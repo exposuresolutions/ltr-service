@@ -6,6 +6,7 @@ import logging
 import numpy as np
 from datetime import datetime
 import os
+import requests # Added for Abacus.ai integration
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -91,8 +92,106 @@ class SimpleRelevanceModel:
         # Normalize score to [0, 1]
         return min(max(score, 0.0), 1.0)
 
-# Initialize model
-model = SimpleRelevanceModel()
+# Abacus.ai LTR Model
+class AbacusLTRModel:
+    def __init__(self):
+        self.api_key = os.getenv("ABACUS_AI_API_KEY")
+        self.model_id = os.getenv("ABACUS_MODEL_ID", "your-default-ltr-model-id") # Provide a default or ensure it's set
+        self.base_url = os.getenv("ABACUS_API_BASE_URL", "https://api.abacus.ai/v1") # Allow overriding base URL
+
+        if not self.api_key:
+            logger.warning("ABACUS_AI_API_KEY not set. AbacusLTRModel may not function.")
+        if self.model_id == "your-default-ltr-model-id":
+            logger.warning("ABACUS_MODEL_ID not set or using default. Ensure this is configured for Abacus.ai.")
+
+    def _simple_fallback(self, query: str, tool_description: str) -> float:
+        """Fallback to a simple model if Abacus.ai fails or is not configured."""
+        logger.warning("Abacus.ai prediction failed or not configured. Falling back to simple model.")
+        # This uses an instance of the simple model for fallback
+        # For simplicity, directly instantiating here. Consider a shared instance if performance is critical.
+        simple_model_fallback = SimpleRelevanceModel()
+        return simple_model_fallback.predict_relevance(query, tool_description)
+
+    def predict_relevance(self, query: str, tool_description: str) -> float: # Matched signature
+        """Predict relevance score using Abacus.ai API."""
+        if not self.api_key or not self.model_id or self.model_id == "your-default-ltr-model-id":
+            logger.warning("Abacus.ai API key or model ID not configured. Using fallback.")
+            return self._simple_fallback(query, tool_description)
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        # The payload structure depends on your Abacus.ai model's expected input.
+        # Assuming it takes 'query' and 'tool_description' as features.
+        # Adjust this payload to match your Abacus.ai model's schema.
+        payload = {
+            "model_id": self.model_id,
+            "deployment_token": os.getenv("ABACUS_DEPLOYMENT_TOKEN"), # If your model uses a deployment token
+            "features": { # Common way to pass features
+                "query_text": query,
+                "tool_desc_text": tool_description
+                # Add other features your Abacus.ai model expects
+            }
+        }
+        # Remove deployment_token if not used by your Abacus model
+        if not payload["deployment_token"]:
+            del payload["deployment_token"]
+
+        try:
+            logger.info(f"Querying Abacus.ai model {self.model_id} at {self.base_url}/predictions")
+            response = requests.post(
+                f"{self.base_url}/predictions", # Common endpoint, verify with Abacus.ai docs
+                json=payload,
+                headers=headers,
+                timeout=10  # Adding a timeout
+            )
+            response.raise_for_status()  # Raises HTTPError for bad responses (4XX or 5XX)
+            
+            prediction_data = response.json()
+            logger.info(f"Abacus.ai response: {prediction_data}")
+
+            # Extract the relevance score. This path depends on your Abacus.ai model's output structure.
+            # Example: prediction_data['predictions'][0]['label_scores']['relevant']
+            # Or: prediction_data['predictions'][0]['score']
+            # Please adjust this based on the actual response from your Abacus.ai model.
+            # Assuming the score is directly available or under a 'relevance_score' key.
+            relevance_score = prediction_data.get("relevance_score") # A placeholder
+            if relevance_score is None: # Try a common structure
+                 if "predictions" in prediction_data and isinstance(prediction_data["predictions"], list) and len(prediction_data["predictions"]) > 0:
+                    if isinstance(prediction_data["predictions"][0], dict) and "score" in prediction_data["predictions"][0]:
+                         relevance_score = prediction_data["predictions"][0]["score"]
+                    elif isinstance(prediction_data["predictions"][0], dict) and "relevance_score" in prediction_data["predictions"][0]:
+                         relevance_score = prediction_data["predictions"][0]["relevance_score"]
+
+
+            if relevance_score is not None:
+                return float(relevance_score)
+            else:
+                logger.error(f"Could not extract relevance score from Abacus.ai response: {prediction_data}")
+                return self._simple_fallback(query, tool_description)
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Abacus.ai request failed: {e}")
+            return self._simple_fallback(query, tool_description)
+        except Exception as e:
+            logger.error(f"Error processing Abacus.ai response: {e}")
+            return self._simple_fallback(query, tool_description)
+
+# Initialize model based on environment variable
+MODEL_TYPE = os.getenv("MODEL_TYPE", "simple").lower()
+
+if MODEL_TYPE == "abacus_ai_pro":
+    logger.info("Using Abacus.ai Pro LTR Model")
+    model = AbacusLTRModel()
+elif MODEL_TYPE == "simple":
+    logger.info("Using Simple Relevance Model")
+    model = SimpleRelevanceModel()
+else:
+    logger.warning(f"Unknown MODEL_TYPE '{MODEL_TYPE}'. Defaulting to Simple Relevance Model.")
+    model = SimpleRelevanceModel()
+
 
 @app.get("/", response_model=Dict[str, str])
 async def root():
