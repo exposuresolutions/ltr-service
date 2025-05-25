@@ -20,6 +20,12 @@ jobs:
       - name: Run basic health check
         run: |
           python -c "import sys; sys.path.append('.'); from tool_relevance_api import app; print('✅ App imports successfully')"
+      - name: Save logs as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: ./
 
   deploy-railway:
     needs: build-and-test
@@ -34,6 +40,10 @@ jobs:
           railway up --service ltr-service
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      - name: Post-deploy health check (Railway)
+        run: |
+          curl --fail https://your-railway-url/health
+        continue-on-error: true
 
   deploy-flyio:
     needs: build-and-test
@@ -51,6 +61,63 @@ jobs:
           flyctl deploy --app ltr-service-pro --remote-only
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      - name: Post-deploy health check (Fly.io)
+        run: |
+          curl --fail https://ltr-service-pro.fly.dev/health
+        continue-on-error: true
 
-  # Render deployment can be added here if you use Render's API or CLI
-  # For most users, Render deploys automatically on push to main
+  deploy-render:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    if: ${{ secrets.RENDER_API_KEY != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Render CLI
+        run: |
+          npm install -g render-cli
+      - name: Deploy to Render
+        run: |
+          render services deploy --service-id ${{ secrets.RENDER_SERVICE_ID }} --api-key ${{ secrets.RENDER_API_KEY }}
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+      - name: Post-deploy health check (Render)
+        run: |
+          curl --fail https://your-render-url/health
+        continue-on-error: true
+  notify:
+    needs: [deploy-railway, deploy-flyio, deploy-render]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Notify on Slack (optional)
+        if: ${{ secrets.SLACK_WEBHOOK_URL != '' }}
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          fields: repo,commit,author,workflow,job,took
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      - name: Notify by Email (Office 365)
+        if: ${{ secrets.NOTIFY_EMAIL_TO != '' && secrets.NOTIFY_EMAIL_FROM != '' && secrets.NOTIFY_EMAIL_PASSWORD != '' }}
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.office365.com
+          server_port: 587
+          secure: true
+          username: ${{ secrets.NOTIFY_EMAIL_FROM }}
+          password: ${{ secrets.NOTIFY_EMAIL_PASSWORD }}
+          subject: "[LTR Service] Deployment ${{ job.status }}"
+          to: ${{ secrets.NOTIFY_EMAIL_TO }}
+          from: ${{ secrets.NOTIFY_EMAIL_FROM }}
+          body: |
+            Deployment status: ${{ job.status }}
+            Repository: ${{ github.repository }}
+            Workflow: ${{ github.workflow }}
+            Commit: ${{ github.sha }}
+            See details: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      - name: Notify by Telegram (optional)
+        if: ${{ secrets.TELEGRAM_BOT_TOKEN != '' && secrets.TELEGRAM_CHAT_ID != '' }}
+        run: |
+          curl -s -X POST https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage \
+            -d chat_id=${{ secrets.TELEGRAM_CHAT_ID }} \
+            -d text="[LTR Service] Deployment ${{ job.status }}%0ARepo: ${{ github.repository }}%0AWorkflow: ${{ github.workflow }}%0ACommit: ${{ github.sha }}%0ASee details: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
